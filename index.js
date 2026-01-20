@@ -37,6 +37,16 @@ function loadEnvFile() {
 
 loadEnvFile();
 
+const RESULT_DIR = path.join(__dirname, 'result');
+
+function ensureResultDir() {
+  if (!fs.existsSync(RESULT_DIR)) {
+    fs.mkdirSync(RESULT_DIR, { recursive: true });
+  }
+}
+
+ensureResultDir();
+
 const DB_HOST = process.env.DB_HOST;
 const DB_USER = process.env.DB_USER;
 const DB_PASSWORD = process.env.DB_PASSWORD;
@@ -55,14 +65,11 @@ app.listen(port, () => {
   console.log(`Example app listening on port ${port}`);
 });
 
-app.get('/bible', (req, res) => {
-  res.send('POST /bible 엔드포인트에 {"days": 숫자} 형태의 JSON을 전송해주세요.');
-});
-
 app.post('/bible', (req, res) => {
     const { days } = req.body;
+    const parsedDays = Number(days);
 
-    if (!days || isNaN(days)) {
+    if (!Number.isInteger(parsedDays) || parsedDays <= 0) {
       return res.status(400).json({ error: '유효한 통독 일수를 입력하세요.' });
     }
 
@@ -88,12 +95,19 @@ app.post('/bible', (req, res) => {
         const allCount = results.reduce((sum, obj) => sum + obj.countOfChapter, 0);
 
         // 모든 글자 수를 일수로 나누어 평균 글자 수를 구함
-        const countAvg = Math.floor(allCount / days);
+        const countAvg = Math.floor(allCount / parsedDays);
 
-        const bibleList = divideBibleByDays(results, countAvg, 0.01, days);
+        let bibleList;
+        try {
+          bibleList = divideBibleByDays(results, countAvg, 0.01, parsedDays);
+        } catch (divideError) {
+          console.error('통독 데이터 분할 오류:', divideError);
+          return res.status(500).json({ error: '통독 데이터를 분할하지 못했습니다.' });
+        }
 
-        const outputFilename = `성경통독표(${days}일).csv`;
-        const filePath = path.join(__dirname, outputFilename);
+        ensureResultDir();
+        const outputFilename = `성경통독표(${parsedDays}일).csv`;
+        const filePath = path.join(RESULT_DIR, outputFilename);
 
         const csvWriter = createObjectCsvWriter({
           path: filePath,
