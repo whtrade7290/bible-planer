@@ -4,6 +4,13 @@ const { createObjectCsvWriter } = require('csv-writer');
 const express = require('express');
 const mysql = require('mysql2');
 
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -65,14 +72,40 @@ app.listen(port, () => {
   console.log(`Example app listening on port ${port}`);
 });
 
-app.post('/bible', (req, res) => {
-    const { days } = req.body;
-    const parsedDays = Number(days);
+app.post('/bible', async (req, res) => {
+    try {
+      const days = validateDaysInput(req.body.days);
+      const bibleData = await fetchBibleChapters();
+      const biblePlan = buildReadingPlan(bibleData, days);
+      const { filePath, outputFilename } = await createPlanCsv(biblePlan, days);
 
-    if (!Number.isInteger(parsedDays) || parsedDays <= 0) {
-      return res.status(400).json({ error: '유효한 통독 일수를 입력하세요.' });
+      res.download(filePath, outputFilename, err => {
+        if (err) {
+          console.error('파일 다운로드 오류:', err);
+          if (!res.headersSent) {
+            res.status(500).json({ error: '파일 다운로드 중 오류가 발생했습니다.' });
+          }
+        }
+      });
+    } catch (error) {
+      console.error('/bible 처리 오류:', error);
+      const status = error.status || 500;
+      const message =
+        status === 500 ? '요청 처리 중 서버 오류가 발생했습니다.' : error.message;
+      res.status(status).json({ error: message });
     }
+  });
 
+function validateDaysInput(days) {
+  const parsedDays = Number(days);
+  if (!Number.isInteger(parsedDays) || parsedDays <= 0) {
+    throw new HttpError(400, '유효한 통독 일수를 입력하세요.');
+  }
+  return parsedDays;
+}
+
+function fetchBibleChapters() {
+  return new Promise((resolve, reject) => {
     connection1.query(
       `
         SELECT b.idx, b.long_label, b.chapter, b.book, b.countOfChapter
@@ -88,66 +121,56 @@ app.post('/bible', (req, res) => {
       (error, results) => {
         if (error) {
           console.error('데이터베이스 조회 오류:', error);
-          return res.status(500).json({ error: '데이터베이스 조회 중 오류가 발생했습니다.' });
+          return reject(new HttpError(500, '데이터베이스 조회 중 오류가 발생했습니다.'));
         }
-
-        // 모든 글자 수
-        const allCount = results.reduce((sum, obj) => sum + obj.countOfChapter, 0);
-
-        // 모든 글자 수를 일수로 나누어 평균 글자 수를 구함
-        const countAvg = Math.floor(allCount / parsedDays);
-
-        let bibleList;
-        try {
-          bibleList = divideBibleByDays(results, countAvg, 0.01, parsedDays);
-        } catch (divideError) {
-          console.error('통독 데이터 분할 오류:', divideError);
-          return res.status(500).json({ error: '통독 데이터를 분할하지 못했습니다.' });
-        }
-
-        ensureResultDir();
-        const outputFilename = `성경통독표(${parsedDays}일).csv`;
-        const filePath = path.join(RESULT_DIR, outputFilename);
-
-        const csvWriter = createObjectCsvWriter({
-          path: filePath,
-          header: [
-            { id: 'date', title: '날짜' },
-            { id: 'startLabel', title: '성경(시작)' },
-            { id: 'startChapter', title: '장(시작)' },
-            { id: 'endLabel', title: '성경(끝)' },
-            { id: 'endChapter', title: '장(끝)' },
-            { id: 'addSum', title: '글 수' }
-          ]
-        });
-
-        const records = bibleList.map((item, date) => ({
-          date: date + 1,
-          startLabel: item.startChapter.long_label,
-          startChapter: item.startChapter.chapter,
-          endLabel: item.endChapter.long_label,
-          endChapter: item.endChapter.chapter,
-          addSum: item.endChapter.addSum
-        }));
-
-        csvWriter
-          .writeRecords(records)
-          .then(() => {
-            console.log('CSV 파일이 성공적으로 작성되었습니다.');
-            res.download(filePath, outputFilename, err => {
-              if (err) {
-                console.error('파일 다운로드 오류:', err);
-                res.status(500).json({ error: '파일 다운로드 중 오류가 발생했습니다.' });
-              }
-            });
-          })
-          .catch(err => {
-            console.error('CSV 작성 오류:', err);
-            res.status(500).json({ error: 'CSV 작성 중 오류가 발생했습니다.' });
-          });
+        resolve(results);
       }
     );
   });
+}
+
+function buildReadingPlan(results, days) {
+  const allCount = results.reduce((sum, obj) => sum + obj.countOfChapter, 0);
+  const countAvg = Math.floor(allCount / days);
+
+  try {
+    return divideBibleByDays(results, countAvg, 0.01, days);
+  } catch (error) {
+    console.error('통독 데이터 분할 오류:', error);
+    throw new HttpError(500, '통독 데이터를 분할하지 못했습니다.');
+  }
+}
+
+async function createPlanCsv(bibleList, days) {
+  ensureResultDir();
+  const outputFilename = `성경통독표(${days}일).csv`;
+  const filePath = path.join(RESULT_DIR, outputFilename);
+
+  const csvWriter = createObjectCsvWriter({
+    path: filePath,
+    header: [
+      { id: 'date', title: '날짜' },
+      { id: 'startLabel', title: '성경(시작)' },
+      { id: 'startChapter', title: '장(시작)' },
+      { id: 'endLabel', title: '성경(끝)' },
+      { id: 'endChapter', title: '장(끝)' },
+      { id: 'addSum', title: '글 수' }
+    ]
+  });
+
+  const records = bibleList.map((item, date) => ({
+    date: date + 1,
+    startLabel: item.startChapter.long_label,
+    startChapter: item.startChapter.chapter,
+    endLabel: item.endChapter.long_label,
+    endChapter: item.endChapter.chapter,
+    addSum: item.endChapter.addSum
+  }));
+
+  await csvWriter.writeRecords(records);
+  console.log('CSV 파일이 성공적으로 작성되었습니다.');
+  return { filePath, outputFilename };
+}
 
 
 /**
